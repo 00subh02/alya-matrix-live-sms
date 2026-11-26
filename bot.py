@@ -96,13 +96,13 @@ PREMIUM_EMOJI = os.getenv("PREMIUM_EMOJI", "1").strip().lower() not in (
     "0", "off", "false", "no"
 )
 PORT = int(os.getenv("PORT", "10000"))
-# Bot khud har 1-7 minute me apne /health ko ping karta hai (random interval).
+# Bot khud har 1-2 minute me apne /health ko ping karta hai (random interval).
 SELF_PING_URL = os.getenv(
     "SELF_PING_URL", "https://matrix-live-sms.onrender.com/health"
 ).strip()
 SELF_PING_MIN_SEC = max(30, int(os.getenv("SELF_PING_MIN_SEC", "60")))
 SELF_PING_MAX_SEC = max(
-    SELF_PING_MIN_SEC, int(os.getenv("SELF_PING_MAX_SEC", "420"))
+    SELF_PING_MIN_SEC, int(os.getenv("SELF_PING_MAX_SEC", "120"))
 )
 HERE = Path(__file__).resolve().parent
 TIMEOUT = (3, 12)      # panel: fast connect, bounded read
@@ -461,16 +461,15 @@ def _health_server() -> None:
 
 
 def _self_ping() -> None:
-    """Random 1-7 min me khud ko ping: Render idle spin-down reset hota hai."""
+    """Boot par turant, phir har 1-2 min: Render idle spin-down reset hota hai."""
     sess = requests.Session()
     while True:
+        if SELF_PING_URL:
+            try:
+                sess.get(SELF_PING_URL, timeout=(2, 6))
+            except Exception as exc:
+                log.warning("self-ping fail: %s", exc)
         time.sleep(random.uniform(SELF_PING_MIN_SEC, SELF_PING_MAX_SEC))
-        if not SELF_PING_URL:
-            continue
-        try:
-            sess.get(SELF_PING_URL, timeout=(2, 6))
-        except Exception as exc:
-            log.warning("self-ping fail: %s", exc)
 
 
 def main() -> None:

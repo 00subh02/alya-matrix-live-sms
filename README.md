@@ -7,7 +7,7 @@ Kya hai:
 - Sirf **nayi** entries Telegram group (`SMS_LIVE_CHAT`) me bhejta hai (boot par purani rows skip).
 - Card me: client, range, CLI, number, SMS text, time (IST, 12-hour).
 - Premium custom emoji (sample se liye gaye emoji-id): `PREMIUM_EMOJI=0` karne se plain emoji, reject hone par auto-fallback.
-- Har 1–7 minute random self-ping: Render free instance idle spin-down nahi hota.
+- Har **1–2 minute** random self-ping (boot par turant pehla ping): Render free instance idle spin-down nahi hota.
 
 Kya **nahi** hai (sab hata diya):
 - **DM bilkul nahi** — koi DM reply nahi, username prompt nahi, subscription nahi, warning nahi, `getUpdates` nahi, `getChatMember` nahi. Bot sirf group me bhejta hai.
@@ -27,7 +27,7 @@ Kya **nahi** hai (sab hata diya):
 
 - Repo: `https://github.com/00subh02/alya-matrix-live-sms` (public). Secrets repo me nahi — sirf Render env vars me hain. `.env` gitignore hai.
 - Render Web Service: build `pip install -r requirements.txt`, start `python bot.py`, health check `/health`.
-- `/health` → `ok` bot ke andar hi chalne wale HTTP server se. Bot khud **random 1–7 minute** (`SELF_PING_MIN_SEC`/`SELF_PING_MAX_SEC`) me `SELF_PING_URL` ko ping karta hai. Bahar se bhi do ping chal rahe hain (Windows Task `MatrixSMS Render Keepalive` + OpenCode automation) taaki spin-down ke baad instance wake ho.
+- `/health` → `ok` bot ke andar hi chalne wale HTTP server se. Bot khud **boot par turant**, phir **random 1–2 minute** (`SELF_PING_MIN_SEC`/`SELF_PING_MAX_SEC`) me `SELF_PING_URL` ko ping karta hai. Bahar se bhi do ping backup ke liye chal rahe hain (Windows Task `MatrixSMS Render Keepalive` + OpenCode automation).
 - Free quota: 750 instance-hours / month. 31 din × 24h = 744h, yani keepalive ke saath poora month technically fit hota hai (6h margin). Render free instance ko kabhi bhi restart kar sakta hai — restart par baseline dobara set, group flow waisa hi.
 - Ephemeral filesystem: restart/deploy/spin-down par local files lost. Bot koi long-term file nahi rakhta, isliye "storage full" ka issue nahi.
 
