@@ -3,6 +3,7 @@
 Matrix SMS Report (/api/sms) ko poll karta hai aur sirf NAYI entries
 Telegram group me bhejta hai. Kuch aur nahi:
   - payout nahi
+  - DM nahi (koi DM reply/subscription/warning nahi, getUpdates bhi nahi)
   - stats / /update nahi
   - CLI hunt nahi
   - announcements nahi
@@ -94,18 +95,6 @@ FETCH_LIMIT = max(25, min(1000, int(os.getenv("FETCH_LIMIT", "100"))))
 PREMIUM_EMOJI = os.getenv("PREMIUM_EMOJI", "1").strip().lower() not in (
     "0", "off", "false", "no"
 )
-# DM onboarding: group se member-match karke allow, phir client username se subscribe.
-DM_FEATURE = os.getenv("DM_FEATURE", "1").strip().lower() not in (
-    "0", "off", "false", "no"
-)
-GROUP_CHAT_ID = (
-    os.getenv("GROUP_CHAT_ID", "").strip() or CHAT_ID
-)
-OWNER_ID = os.getenv("OWNER_ID", "5292186225").strip()
-ALLOWED_IDS = {
-    x.strip() for x in os.getenv("ALLOWED_IDS", "").split(",") if x.strip()
-}
-PENDING_TTL_SEC = max(60, int(os.getenv("PENDING_TTL_SEC", "1800")))
 PORT = int(os.getenv("PORT", "10000"))
 # Bot khud har 1-7 minute me apne /health ko ping karta hai (random interval).
 SELF_PING_URL = os.getenv(
@@ -118,7 +107,6 @@ SELF_PING_MAX_SEC = max(
 HERE = Path(__file__).resolve().parent
 TIMEOUT = (3, 12)      # panel: fast connect, bounded read
 TG_TIMEOUT = (2, 6)    # Telegram replies: quick connect, no long hang
-UPDATE_POLL_SEC = 1    # DM replies: 1s long-poll
 REQ_RETRIES = 3        # transient network / 5xx retries
 RETRY_BASE = 0.35      # exponential backoff + jitter
 
@@ -143,19 +131,7 @@ _session: requests.Session | None = None
 _tg_session = requests.Session()   # 1 connection reuse — delay kam
 
 # Pure in-memory state. Koi file / cache / disk write nahi.
-_subs: dict[str, str] = {}       # chat_id -> client
-_allowed: set[str] = set()       # GC member check ek baar, phir memory
-_blocked: set[str] = set()
-_pending: dict[str, float] = {}  # user_id -> asked-at
-_state_lock = threading.Lock()
-_MAX_BLOCKED = 5000
-_MAX_PENDING = 1000
-
-
-def subs_snapshot() -> dict[str, str]:
-    with _state_lock:
-        return dict(_subs)
-
+# (Sirf _seen; DM/subscription state ab bilkul nahi.)
 
 # ---------------------------------------------------------------- panel ----
 def _get_session() -> requests.Session:
@@ -378,14 +354,11 @@ def _telegram(
             raise RuntimeError(f"telegram {method}: {str(body)[:200]}")
         return body
 
-    # getUpdates 409 = doosra instance; yahan retry nahi, loop khud next poll karega.
-    if method == "getUpdates":
-        return once()
     return _retry(once)
 
 
 def card_text(row: dict, premium: bool = True) -> str:
-    """Ek hi card renderer — GROUP aur DM dono yahi use karte hain."""
+    """Group card renderer — same premium emoji, fields, HTML, time format."""
     return format_row(row, premium=premium)
 
 
@@ -419,240 +392,6 @@ def send_sms(row: dict, chat_id: str | int = CHAT_ID) -> bool:
         except Exception as exc2:
             log.warning("plain retry failed to %s: %s", chat_id, exc2)
             return False
-
-
-def _strip_markup(text: str) -> str:
-    return html.unescape(_TAG_RE.sub("", text))
-
-
-def send_text(chat_id: str | int, text: str, plain: str | None = None) -> bool:
-    """Premium markup bhejo; Telegram reject kare to plain text se retry."""
-    global _premium_broken
-    plain = plain if plain is not None else _strip_markup(text)
-    payload = {
-        "chat_id": chat_id,
-        "text": text[:3900],
-        "disable_web_page_preview": True,
-    }
-    if text != plain:
-        payload["parse_mode"] = "HTML"
-    try:
-        _telegram("sendMessage", payload)
-        return True
-    except Exception as exc:
-        msg = str(exc).lower()
-        if not any(w in msg for w in ("emoji", "invalid", "bad request", "parse", "entities", "html")):
-            raise
-        _premium_broken = True
-        log.warning("premium markup rejected (%s) — plain text se retry", exc)
-        _telegram(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": plain[:3900],
-                "disable_web_page_preview": True,
-            },
-        )
-        return True
-
-
-# ------------------------------------------------------------- DM access ----
-_known_clients: set[str] = set()
-_roster: set[str] = set()
-_roster_checked = False
-_MEMBER_STATUS = {"creator", "owner", "administrator", "member"}
-
-
-def fetch_client_roster() -> set[str]:
-    """Client list sirf ek baar fetch — disk/cache nahi, memory me rakho."""
-    global _roster, _roster_checked
-    if _roster_checked:
-        return set(_roster) | set(_known_clients)
-    _roster_checked = True
-    try:
-        sess = _get_session()
-
-        def call():
-            return sess.get(BASE_URL + "/agent/clients", timeout=TIMEOUT)
-
-        resp = call()
-        if resp.status_code == 401 or 'action="/auth/login"' in resp.text:
-            _login(sess)
-            resp = call()
-        resp.raise_for_status()
-        _roster = {m.upper() for m in re.findall(r"\bDEVIL_[A-Z0-9_]+\b", resp.text)}
-        log.info("client roster: %d names", len(_roster))
-    except Exception:
-        _roster_checked = False  # agle DM par dobara try, restart ki zarurat nahi
-        log.exception("client roster fetch fail — known clients se chalenge")
-    return set(_roster) | set(_known_clients)
-
-
-def is_group_member(uid: str) -> bool:
-    """Ek baar getChatMember, baad me memory se (fast reply)."""
-    if uid in _blocked:
-        return False
-    if uid in _allowed:
-        return True
-    try:
-        res = _telegram(
-            "getChatMember",
-            params={"chat_id": GROUP_CHAT_ID, "user_id": uid},
-        )
-        status = str((res.get("result") or {}).get("status", "")).lower()
-        if status in _MEMBER_STATUS:
-            _allowed.add(uid)
-            return True
-    except Exception as exc:
-        log.warning("getChatMember(%s) fail: %s", uid, exc)
-    # GC check na ho paaye to sirf owner / explicit allow list
-    ok = uid in ALLOWED_IDS or uid == OWNER_ID or uid in subs_snapshot()
-    if ok:
-        _allowed.add(uid)
-    return ok
-
-
-def warn_unknown(uid: str, label: str) -> None:
-    try:
-        send_text(
-            GROUP_CHAT_ID,
-            f"⚠️ Random user ne DM kiya: {label} (id {uid}). "
-            "Reply nahi kiya — block list me daal diya.",
-        )
-    except Exception:
-        log.exception("warning bhejne me fail")
-
-
-def handle_message(msg: dict) -> None:
-    """Sirf private DM handle karta hai; GC ka purana flow nahi chhota."""
-    if not DM_FEATURE:
-        return
-    chat = msg.get("chat") or {}
-    if str(chat.get("type", "")) != "private":
-        return
-    frm = msg.get("from") or {}
-    uid = str(frm.get("id", ""))
-    if not uid:
-        return
-    uname = str(frm.get("username") or "").strip()
-    label = f"@{uname}" if uname else (
-        " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x)
-        or "unknown"
-    )
-    text = (msg.get("text") or "").strip()
-
-    with _state_lock:
-        if uid in _blocked:
-            return
-
-    if uid in _pending and time.time() - _pending[uid] > PENDING_TTL_SEC:
-        _pending.pop(uid, None)
-
-    if not is_group_member(uid):
-        with _state_lock:
-            _blocked.add(uid)
-            if len(_blocked) > _MAX_BLOCKED:
-                _blocked.clear()  # lifetime me memory grow na ho
-        log.warning("unknown DM blocked: %s (%s)", uid, label)
-        warn_unknown(uid, label)
-        return
-
-    if uid in _pending:
-        if text.lower() in ("/cancel", "cancel"):
-            _pending.pop(uid, None)
-            send_text(uid, f"{emo('✅')} Cancel kar diya.", "Cancel kar diya.")
-            return
-        client = re.sub(r"^@+", "", text).strip().upper().replace(" ", "_")
-        valid = (
-            client in fetch_client_roster()
-            or client in _known_clients
-            or client in subs_snapshot().values()
-        )
-        if not valid:
-            plain = (
-                f"❌ '{client}' client list me nahi mila. "
-                "Sahi username bhejein (jaise DEVIL_LUFFY)."
-            )
-            send_text(
-                uid,
-                f"{emo('❌')} '{html.escape(client)}' client list me nahi mila. "
-                "Sahi username bhejein (jaise DEVIL_LUFFY).",
-                plain,
-            )
-            return
-        with _state_lock:
-            _subs[uid] = client
-            _pending.pop(uid, None)
-        send_text(
-            uid,
-            f"{emo('✅')} Apka custom ID add ho gaya: <code>{html.escape(client)}</code>\n"
-            "Ab is chat me sirf is client ki nayi live SMS bhejunga.",
-            f"✅ Apka custom ID add ho gaya: {client}\n"
-            "Ab is chat me sirf is client ki nayi live SMS bhejunga.",
-        )
-        log.info("dm subscribed: %s -> %s", uid, client)
-        return
-
-    if text.lower() in ("/cancel", "cancel"):
-        with _state_lock:
-            _subs.pop(uid, None)
-            _pending.pop(uid, None)
-        send_text(
-            uid,
-            f"{emo('✅')} Subscription hata diya.",
-            "✅ Subscription hata diya.",
-        )
-        return
-
-    current = subs_snapshot().get(uid)
-    if current and text.lower() not in ("/start", "start"):
-        send_text(
-            uid,
-            f"{emo('✅')} Aap already subscribed ho: <code>{html.escape(current)}</code>\n"
-            "Badalna hai to naya client username bhej do.",
-            f"✅ Aap already subscribed ho: {current}\n"
-            "Badalna hai to naya client username bhej do.",
-        )
-        return
-
-    with _state_lock:
-        _pending[uid] = time.time()
-        if len(_pending) > _MAX_PENDING:
-            _pending.pop(next(iter(_pending)))
-    send_text(
-        uid,
-        "Boss, aapka ID allowed list me hai "
-        + emo("✅")
-        + "\nKya aap mujhe apna client username batayenge? (jaise DEVIL_LUFFY)",
-        "Boss, aapka ID allowed list me hai ✅\n"
-        "Kya aap mujhe apna client username batayenge? (jaise DEVIL_LUFFY)",
-    )
-
-
-def update_loop() -> None:
-    """Telegram updates (DM) background thread me padhta hai."""
-    offset = 0
-    while True:
-        try:
-            res = _telegram(
-                "getUpdates",
-                params={
-                    "offset": offset,
-                    "timeout": UPDATE_POLL_SEC,
-                    "allowed_updates": '["message"]',
-                },
-            )
-            for upd in res.get("result", []):
-                offset = max(offset, int(upd.get("update_id", 0)) + 1)
-                msg = upd.get("message") or upd.get("edited_message")
-                if msg:
-                    try:
-                        handle_message(msg)
-                    except Exception:
-                        log.exception("dm handler error")
-        except Exception:
-            log.exception("getUpdates error — retry in 1s")
-            time.sleep(1)
 
 
 # ------------------------------------------------------------------ watch ---
@@ -689,11 +428,6 @@ def watch() -> None:
     while True:
         try:
             rows = fetch_rows()
-            _known_clients.update(
-                str(r.get("client", "")).strip().upper()
-                for r in rows
-                if r.get("client")
-            )
             fresh = [r for r in reversed(rows) if _remember(r)]
             if not baseline and rows:
                 baseline = True
@@ -702,13 +436,6 @@ def watch() -> None:
                 for row in fresh:
                     if send_sms(row):
                         log.info("group sent: %s | %s", row.get("client"), row.get("range"))
-                    subs = subs_snapshot()
-                    if subs:
-                        client = str(row.get("client", "")).strip().upper()
-                        for chat_id, sub_client in subs.items():
-                            if client == sub_client:
-                                if send_sms(row, chat_id):
-                                    log.info("dm sent: %s -> chat %s", client, chat_id)
                     time.sleep(SEND_DELAY_SEC)
         except Exception:
             log.exception("poll error — retry in 2s")
@@ -760,26 +487,20 @@ def main() -> None:
             raise RuntimeError(f".env me {name} missing")
     try:
         int(CHAT_ID)
-        int(GROUP_CHAT_ID)
     except ValueError:
         raise RuntimeError("chat id numeric hona chahiye (-100...)")
     me = _telegram("getMe")
     log.info(
-        "online as @%s -> group %s (poll %ss, payout: never, dm=%s)",
+        "online as @%s -> group %s (poll %ss, payout: never, dm=off)",
         me["result"].get("username", "?"),
-        GROUP_CHAT_ID,
+        CHAT_ID,
         POLL_SEC,
-        "on" if DM_FEATURE else "off",
     )
     try:
         _login(_get_session())  # 1 baar login, usi session par sab kuch
         log.info("panel login once OK (same session reused)")
     except Exception:
         log.exception("startup panel login fail — zaroorat par re-login hoga")
-    if DM_FEATURE:
-        fetch_client_roster()   # startup par ek baar, phir memory se
-        threading.Thread(target=update_loop, name="dm-updates", daemon=True).start()
-        log.info("dm access-check: GC %s ke members allow (memory)", GROUP_CHAT_ID)
     watch()
 
 
