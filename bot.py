@@ -95,6 +95,9 @@ FETCH_LIMIT = max(25, min(1000, int(os.getenv("FETCH_LIMIT", "100"))))
 PREMIUM_EMOJI = os.getenv("PREMIUM_EMOJI", "1").strip().lower() not in (
     "0", "off", "false", "no"
 )
+# Restart ke baad boot se thoda pehle tak ki SMS bhi pakdo (downtime gap cover).
+RESTART_CATCHUP_SEC = max(0, int(os.getenv("RESTART_CATCHUP_SEC", "30")))
+BOOT_UTC = datetime.now(timezone.utc)
 PORT = int(os.getenv("PORT", "10000"))
 # Bot khud har 1-2 minute me apne /health ko ping karta hai (random interval).
 SELF_PING_URL = os.getenv(
@@ -299,6 +302,15 @@ def _local_time(ts: str) -> str:
     return re.sub(r"\b0(\d:\d\d)", r"\1", s)
 
 
+def _row_utc(row: dict) -> datetime:
+    try:
+        return datetime.strptime(str(row.get("time", "")), "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def emo(glyph: str, premium: bool = True) -> str:
     if not premium or not PREMIUM_EMOJI or _premium_broken:
         return glyph
@@ -431,7 +443,21 @@ def watch() -> None:
             fresh = [r for r in reversed(rows) if _remember(r)]
             if not baseline and rows:
                 baseline = True
-                log.info("baseline ready: %d existing rows ignored", len(fresh))
+                catchup: list[dict] = []
+                if RESTART_CATCHUP_SEC:
+                    cutoff = BOOT_UTC - timedelta(seconds=RESTART_CATCHUP_SEC)
+                    catchup = [r for r in fresh if _row_utc(r) >= cutoff]
+                for row in catchup:
+                    if send_sms(row):
+                        log.info(
+                            "restart catch-up sent: %s | %s",
+                            row.get("client"), row.get("range"),
+                        )
+                    time.sleep(SEND_DELAY_SEC)
+                log.info(
+                    "baseline ready: %d old rows ignored, %d restart catch-up",
+                    len(fresh) - len(catchup), len(catchup),
+                )
             else:
                 for row in fresh:
                     if send_sms(row):

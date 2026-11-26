@@ -8,6 +8,7 @@ Kya hai:
 - Card me: client, range, CLI, number, SMS text, time (IST, 12-hour).
 - Premium custom emoji (sample se liye gaye emoji-id): `PREMIUM_EMOJI=0` karne se plain emoji, reject hone par auto-fallback.
 - Har **1–2 minute** random self-ping (boot par turant pehla ping): Render free instance idle spin-down nahi hota.
+- **Restart-safe:** boot ke baad purani rows baseline me skip hoti hain, lekin boot se **30 second pehle tak** ki nayi SMS bhi bhej di jaati hain (`RESTART_CATCHUP_SEC`) — restart gap me SMS kho nahi jaati.
 
 Kya **nahi** hai (sab hata diya):
 - **DM bilkul nahi** — koi DM reply nahi, username prompt nahi, subscription nahi, warning nahi, `getUpdates` nahi, `getChatMember` nahi. Bot sirf group me bhejta hai.
@@ -22,6 +23,7 @@ Kya **nahi** hai (sab hata diya):
 - **Speed:** `POLL_SEC=2`, `SEND_DELAY_SEC=0.2`, panel timeout `(3,12)s`, Telegram timeout `(2,6)s`. Ek hi `requests.Session` panel ke liye aur ek Telegram ke liye (connection reuse).
 - **Stable:** transient network / 5xx par 3 retries + exponential backoff. Session expire ya panel 5xx par auto re-login. Telegram 429 par `retry_after` follow. 400 (emoji/parse) par turant plain-text fallback — retry wait nahi.
 - **Group-only:** `getUpdates` loop hata diya gaya, isliye duplicate-instance `409 Conflict` errors aur nahi aate.
+- **Auto-start:** Render service restart/deploy par `python bot.py` khud chalta hai; health server + self-ping + watcher sab thread me auto-start. Koi manual command nahi.
 
 ## Render deployment notes
 
