@@ -13,6 +13,7 @@ Telegram group me bhejta hai. Kuch aur nahi:
 
 from __future__ import annotations
 
+import zlib
 import html
 import logging
 import os
@@ -97,6 +98,19 @@ PREMIUM_EMOJI = os.getenv("PREMIUM_EMOJI", "1").strip().lower() not in (
 )
 # Restart ke baad boot se thoda pehle tak ki SMS bhi pakdo (downtime gap cover).
 RESTART_CATCHUP_SEC = max(0, int(os.getenv("RESTART_CATCHUP_SEC", "30")))
+
+# CLI search/sharding: Live Feed (/api/live_feed) se CLI names nikaal kar
+# 3 services me split karna hai. Har service apne hisse ko CLI_CHECK_SEC
+# antar par check karti hai (~20 CLI/min). Sab same group me bhejti hain.
+CLI_SEARCH = os.getenv("CLI_SEARCH", "1").strip().lower() not in (
+    "0", "off", "false", "no"
+)
+LIVE_FEED_PATH = "/api/live_feed"
+CLI_LIST_REFRESH_SEC = max(60, int(os.getenv("CLI_LIST_REFRESH_SEC", "300")))
+CLI_SHARD_INDEX = max(0, int(os.getenv("CLI_SHARD_INDEX", "0")))
+CLI_SHARD_COUNT = max(1, int(os.getenv("CLI_SHARD_COUNT", "1")))
+CLI_CHECK_SEC = max(0.2, float(os.getenv("CLI_CHECK_SEC", "3")))
+
 BOOT_UTC = datetime.now(timezone.utc)
 PORT = int(os.getenv("PORT", "10000"))
 # Bot khud har 1-2 minute me apne /health ko ping karta hai (random interval).
@@ -276,17 +290,84 @@ def _parse(data) -> list[dict]:
     return rows
 
 
-def fetch_rows() -> list[dict]:
-    sess = _get_session()
+_cli_names_cache: list[str] = []
+_cli_names_at = 0.0
+
+
+def _panel_json(sess: requests.Session, path: str, params: dict | None = None) -> dict:
+    """Panel JSON endpoint — session expire par ek hi baar re-login."""
 
     def once():
         resp = sess.get(
-            BASE_URL + SMS_API_PATH,
-            params=_params(FETCH_LIMIT),
+            BASE_URL + path,
+            params=params,
             headers={"X-Requested-With": "XMLHttpRequest"},
             timeout=TIMEOUT,
         )
-        # Session expire ya panel 5xx → fresh login, phir same session reuse.
+        if (
+            resp.status_code in (401, 403)
+            or resp.status_code >= 500
+            or "application/json" not in resp.headers.get("Content-Type", "")
+        ):
+            _login(sess)
+            resp = sess.get(
+                BASE_URL + path,
+                params=params,
+                headers={"X-Requested-With": "XMLHttpRequest"},
+                timeout=TIMEOUT,
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    return _retry(once)
+
+
+def _cli_names(sess: requests.Session) -> list[str]:
+    """Live Feed se CLI names — memory me cache, disk par kuch nahi."""
+    global _cli_names_cache, _cli_names_at
+    now = time.time()
+    if _cli_names_cache and now - _cli_names_at < CLI_LIST_REFRESH_SEC:
+        return list(_cli_names_cache)
+    payload = _panel_json(sess, LIVE_FEED_PATH, {"limit": 500})
+    raw = payload.get("clis") if isinstance(payload, dict) else None
+    names: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            name = _clean(item.get("cli")) if isinstance(item, dict) else _clean(item)
+            if name and name not in names:
+                names.append(name)
+    if names:
+        _cli_names_cache = names
+        _cli_names_at = now
+    return list(_cli_names_cache)
+
+
+def _my_cli_names(sess: requests.Session) -> list[str]:
+    """CLI name se stable shard — list order badle to bhi duplicate nahi."""
+    names = _cli_names(sess)
+    if not names or CLI_SHARD_COUNT <= 1:
+        return names or [""]
+    shard = [
+        name
+        for name in names
+        if zlib.crc32(name.encode("utf-8")) % CLI_SHARD_COUNT == CLI_SHARD_INDEX
+    ]
+    return shard or [""]
+
+
+def _fetch_rows_for(sess: requests.Session, cli: str = "") -> list[dict]:
+    """SMS Report — fcli diya gaya to usi CLI ki rows, warna sab."""
+
+    def once():
+        params = _params(FETCH_LIMIT)
+        if cli:
+            params["fcli"] = cli
+        resp = sess.get(
+            BASE_URL + SMS_API_PATH,
+            params=params,
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            timeout=TIMEOUT,
+        )
         if (
             resp.status_code in (401, 403)
             or resp.status_code >= 500
@@ -295,7 +376,7 @@ def fetch_rows() -> list[dict]:
             _login(sess)
             resp = sess.get(
                 BASE_URL + SMS_API_PATH,
-                params=_params(FETCH_LIMIT),
+                params=params,
                 headers={"X-Requested-With": "XMLHttpRequest"},
                 timeout=TIMEOUT,
             )
@@ -309,6 +390,24 @@ def fetch_rows() -> list[dict]:
         return _parse(data if isinstance(data, list) else [])
 
     return _retry(once)
+
+
+def fetch_rows() -> list[dict]:
+    """Sab CLI ki rows (local test / fallback)."""
+    return _fetch_rows_for(_get_session(), "")
+
+
+def iter_rows():
+    """Sharded CLI search — nayi row milte hi yield, delay nahi."""
+    sess = _get_session()
+    if not CLI_SEARCH:
+        yield from fetch_rows()
+        return
+    for index, cli in enumerate(_my_cli_names(sess)):
+        if index:
+            time.sleep(CLI_CHECK_SEC)
+        for row in reversed(_fetch_rows_for(sess, cli)):
+            yield row
 
 
 # ---------------------------------------------------------------- format ----
@@ -457,15 +556,25 @@ def _remember(row: dict) -> bool:
 def watch() -> None:
     baseline = False
     while True:
+        first_cycle = not baseline
+        ignored = 0
+        catchup: list[dict] = []
+        cutoff = BOOT_UTC - timedelta(seconds=RESTART_CATCHUP_SEC)
         try:
-            rows = fetch_rows()
-            fresh = [r for r in reversed(rows) if _remember(r)]
-            if not baseline and rows:
+            for row in iter_rows():
+                if not _remember(row):
+                    continue
+                if first_cycle:
+                    if RESTART_CATCHUP_SEC and _row_utc(row) >= cutoff:
+                        catchup.append(row)
+                    else:
+                        ignored += 1
+                    continue
+                if send_sms(row):
+                    log.info("group sent: %s | %s", row.get("client"), row.get("range"))
+                time.sleep(SEND_DELAY_SEC)
+            if first_cycle:
                 baseline = True
-                catchup: list[dict] = []
-                if RESTART_CATCHUP_SEC:
-                    cutoff = BOOT_UTC - timedelta(seconds=RESTART_CATCHUP_SEC)
-                    catchup = [r for r in fresh if _row_utc(r) >= cutoff]
                 for row in catchup:
                     if send_sms(row):
                         log.info(
@@ -475,13 +584,8 @@ def watch() -> None:
                     time.sleep(SEND_DELAY_SEC)
                 log.info(
                     "baseline ready: %d old rows ignored, %d restart catch-up",
-                    len(fresh) - len(catchup), len(catchup),
+                    ignored, len(catchup),
                 )
-            else:
-                for row in fresh:
-                    if send_sms(row):
-                        log.info("group sent: %s | %s", row.get("client"), row.get("range"))
-                    time.sleep(SEND_DELAY_SEC)
         except Exception:
             log.exception("poll error — retry in 2s")
             time.sleep(2)
@@ -535,15 +639,22 @@ def main() -> None:
         raise RuntimeError("chat id numeric hona chahiye (-100...)")
     me = _telegram("getMe")
     log.info(
-        "online as @%s -> group %s (poll %ss, payout: never, dm=off, panel=%s)",
+        "online as @%s -> group %s (poll %ss, payout: never, dm=off, panel=%s, cli-shard=%d/%d, cli-check=%ss)",
         me["result"].get("username", "?"),
         CHAT_ID,
         POLL_SEC,
         USERNAME or "?",
+        CLI_SHARD_INDEX + 1 if CLI_SHARD_COUNT > 1 else 0,
+        CLI_SHARD_COUNT,
+        CLI_CHECK_SEC,
     )
     try:
-        _login(_get_session())  # 1 baar login, usi session par sab kuch
+        sess = _get_session()
+        _login(sess)  # 1 baar login, usi session par sab kuch
         log.info("panel login once OK (same session reused)")
+        if CLI_SEARCH:
+            names = _my_cli_names(sess)
+            log.info("CLI search ready: %d CLI in this shard", len([n for n in names if n]))
     except Exception:
         log.exception("startup panel login fail — zaroorat par re-login hoga")
     watch()
