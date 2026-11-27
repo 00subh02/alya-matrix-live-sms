@@ -179,6 +179,14 @@ def _login(sess: requests.Session) -> None:
         resp.raise_for_status()
         if 'action="/auth/login"' in resp.text:
             # Galat credentials par dobara-dobar login nahi — isse 429 milta hai.
+            snippet = re.sub(r"\s+", " ", resp.text)[:180]
+            log.warning(
+                "panel login rejected: status=%s url=%s len=%d body=%s",
+                resp.status_code,
+                resp.url,
+                len(resp.text),
+                snippet,
+            )
             raise _NoRetry("panel login fail: username/password check karein")
 
     _retry(once)
