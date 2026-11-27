@@ -169,9 +169,17 @@ def _login(sess: requests.Session) -> None:
             data={"username": USERNAME, "password": PASSWORD},
             timeout=TIMEOUT,
         )
+        if resp.status_code == 429:
+            try:
+                wait = float(resp.headers.get("Retry-After", "5") or 5)
+            except (TypeError, ValueError):
+                wait = 5.0
+            time.sleep(min(max(wait, 1.0), 30.0))
+            raise RuntimeError("panel login 429 rate-limited")
         resp.raise_for_status()
         if 'action="/auth/login"' in resp.text:
-            raise RuntimeError("panel login fail: username/password check karein")
+            # Galat credentials par dobara-dobar login nahi — isse 429 milta hai.
+            raise _NoRetry("panel login fail: username/password check karein")
 
     _retry(once)
 
