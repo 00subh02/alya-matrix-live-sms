@@ -100,9 +100,12 @@ RESTART_CATCHUP_SEC = max(0, int(os.getenv("RESTART_CATCHUP_SEC", "30")))
 BOOT_UTC = datetime.now(timezone.utc)
 PORT = int(os.getenv("PORT", "10000"))
 # Bot khud har 1-2 minute me apne /health ko ping karta hai (random interval).
-SELF_PING_URL = os.getenv(
-    "SELF_PING_URL", "https://matrix-live-sms.onrender.com/health"
-).strip()
+# Render har web service ko RENDER_EXTERNAL_URL deta hai — kisi bhi account/URL par
+# seedha apna /health pakad leta hai, hard-coded domain nahi.
+_render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+SELF_PING_URL = os.getenv("SELF_PING_URL", "").strip() or (
+    f"{_render_url}/health" if _render_url else ""
+)
 SELF_PING_MIN_SEC = max(30, int(os.getenv("SELF_PING_MIN_SEC", "60")))
 SELF_PING_MAX_SEC = max(
     SELF_PING_MIN_SEC, int(os.getenv("SELF_PING_MAX_SEC", "120"))
@@ -516,10 +519,11 @@ def main() -> None:
         raise RuntimeError("chat id numeric hona chahiye (-100...)")
     me = _telegram("getMe")
     log.info(
-        "online as @%s -> group %s (poll %ss, payout: never, dm=off)",
+        "online as @%s -> group %s (poll %ss, payout: never, dm=off, panel=%s)",
         me["result"].get("username", "?"),
         CHAT_ID,
         POLL_SEC,
+        USERNAME or "?",
     )
     try:
         _login(_get_session())  # 1 baar login, usi session par sab kuch

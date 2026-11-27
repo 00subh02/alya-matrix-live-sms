@@ -28,8 +28,9 @@ Kya **nahi** hai (sab hata diya):
 ## Render deployment notes
 
 - Repo: `https://github.com/00subh02/alya-matrix-live-sms` (public). Secrets repo me nahi — sirf Render env vars me hain. `.env` gitignore hai.
+- Ek hi repo 3 Render accounts (4/5/6) par deploy hoti hai; har service me alag `PANEL_USERNAME`/`PANEL_PASSWORD` (DEVIL_LUFFY / DEVIL_LUFFY1 / DEVIL_NOUBU) aur wahi locked group `SMS_LIVE_CHAT=-1004451914143`. Alag Matrix IDs hone se SMS duplicate nahi hoti. `getUpdates` nahi hai, isliye ek Telegram token ko multiple services safely use kar sakte hain.
 - Render Web Service: build `pip install -r requirements.txt`, start `python bot.py`, health check `/health`.
-- `/health` → `ok` bot ke andar hi chalne wale HTTP server se. Bot khud **boot par turant**, phir **random 1–2 minute** (`SELF_PING_MIN_SEC`/`SELF_PING_MAX_SEC`) me `SELF_PING_URL` ko ping karta hai. Bahar se bhi do ping backup ke liye chal rahe hain (Windows Task `MatrixSMS Render Keepalive` + OpenCode automation).
+- `/health` → `ok` bot ke andar hi chalne wale HTTP server se. Bot khud **boot par turant**, phir **random 1–2 minute** (`SELF_PING_MIN_SEC`/`SELF_PING_MAX_SEC`) me apne `/health` ko ping karta hai. URL Render ke auto-injected `RENDER_EXTERNAL_URL` se banta hai — **kisi bhi Render account/service par alag domain ke liye koi setting nahi**. `SELF_PING_URL` override karne ke liye hai. Bahar se bhi do ping backup ke liye chal rahe hain (Windows Task `MatrixSMS Render Keepalive` + OpenCode automation).
 - Free quota: 750 instance-hours / month. 31 din × 24h = 744h, yani keepalive ke saath poora month technically fit hota hai (6h margin). Render free instance ko kabhi bhi restart kar sakta hai — restart par baseline dobara set, group flow waisa hi.
 - Ephemeral filesystem: restart/deploy/spin-down par local files lost. Bot koi long-term file nahi rakhta, isliye "storage full" ka issue nahi.
 
