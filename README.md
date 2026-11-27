@@ -20,7 +20,8 @@ Kya **nahi** hai (sab hata diya):
 ## Speed / no-storage changes
 
 - **Koi disk storage nahi:** in-memory dedupe sirf `_seen` (4000 keys, 24h TTL). DM state, block list, pending list sab code se hataye gaye. Process restart par baseline dobara set hota hai.
-- **Speed:** `POLL_SEC=2`, `SEND_DELAY_SEC=0.2`, panel timeout `(3,12)s`, Telegram timeout `(2,6)s`. Ek hi `requests.Session` panel ke liye aur ek Telegram ke liye (connection reuse).
+- **Optimized speed:** `POLL_SEC=1`, `SEND_DELAY_SEC=0.1`, panel timeout `(2,8)s`, Telegram timeout `(2,6)s`. Ek hi `requests.Session` panel ke liye aur ek Telegram ke liye (connection reuse). CLI search/live-feed bilkul nahi — sirf `/api/sms`.
+- **Never stop:** boot par turant + random 60–180s andaruna self-ping; upar se 2-min automation aur 2-min Windows keepalive. Telegram `getMe` fail ho to bhi watcher band nahi hota; health server bind fail par auto-retry. Restart par baseline + 30s catch-up.
 - **Stable:** transient network / 5xx par 3 retries + exponential backoff. Session expire ya panel 5xx par auto re-login. Telegram 429 par `retry_after` follow. 400 (emoji/parse) par turant plain-text fallback — retry wait nahi.
 - **Group-only:** `getUpdates` loop hata diya gaya, isliye duplicate-instance `409 Conflict` errors aur nahi aate.
 - **Auto-start:** Render service restart/deploy par `python bot.py` khud chalta hai; health server + self-ping + watcher sab thread me auto-start. Koi manual command nahi.

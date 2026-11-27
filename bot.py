@@ -124,7 +124,7 @@ SELF_PING_MAX_SEC = max(
     SELF_PING_MIN_SEC, int(os.getenv("SELF_PING_MAX_SEC", "120"))
 )
 HERE = Path(__file__).resolve().parent
-TIMEOUT = (3, 12)      # panel: fast connect, bounded read
+TIMEOUT = (2, 8)       # panel: fast connect, bounded read
 TG_TIMEOUT = (2, 6)    # Telegram replies: quick connect, no long hang
 REQ_RETRIES = 3        # transient network / 5xx retries
 RETRY_BASE = 0.35      # exponential backoff + jitter
@@ -605,7 +605,12 @@ def _health_server() -> None:
         def log_message(self, *args):
             pass
 
-    HTTPServer(("0.0.0.0", PORT), Health).serve_forever()
+    while True:
+        try:
+            HTTPServer(("0.0.0.0", PORT), Health).serve_forever()
+        except OSError as exc:
+            log.warning("health server bind failed (%s) — retry in 2s", exc)
+            time.sleep(2)
 
 
 def _self_ping() -> None:
@@ -636,16 +641,25 @@ def main() -> None:
         int(CHAT_ID)
     except ValueError:
         raise RuntimeError("chat id numeric hona chahiye (-100...)")
-    me = _telegram("getMe")
+    # Telegram thoda down ho to bhi watcher band nahi hona chahiye.
+    try:
+        me = _telegram("getMe")
+        bot_name = me["result"].get("username", "?")
+    except Exception as exc:
+        bot_name = "?"
+        log.warning("getMe unavailable (%s) — watcher phir bhi chalega", exc)
+    extra = ""
+    if CLI_SEARCH and CLI_SHARD_COUNT > 1:
+        extra = ", cli-shard=%d/%d, cli-check=%ss" % (
+            CLI_SHARD_INDEX + 1, CLI_SHARD_COUNT, CLI_CHECK_SEC
+        )
     log.info(
-        "online as @%s -> group %s (poll %ss, payout: never, dm=off, panel=%s, cli-shard=%d/%d, cli-check=%ss)",
-        me["result"].get("username", "?"),
+        "online as @%s -> group %s (poll %ss, payout: never, dm=off, panel=%s%s)",
+        bot_name,
         CHAT_ID,
         POLL_SEC,
         USERNAME or "?",
-        CLI_SHARD_INDEX + 1 if CLI_SHARD_COUNT > 1 else 0,
-        CLI_SHARD_COUNT,
-        CLI_CHECK_SEC,
+        extra,
     )
     try:
         sess = _get_session()
