@@ -99,10 +99,9 @@ PREMIUM_EMOJI = os.getenv("PREMIUM_EMOJI", "1").strip().lower() not in (
 # Restart ke baad boot se thoda pehle tak ki SMS bhi pakdo (downtime gap cover).
 RESTART_CATCHUP_SEC = max(0, int(os.getenv("RESTART_CATCHUP_SEC", "30")))
 
-# CLI search/sharding: Live Feed (/api/live_feed) se CLI names nikaal kar
-# 3 services me split karna hai. Har service apne hisse ko CLI_CHECK_SEC
-# antar par check karti hai (~20 CLI/min). Sab same group me bhejti hain.
-CLI_SEARCH = os.getenv("CLI_SEARCH", "1").strip().lower() not in (
+# CLI search/sharding default OFF. Bot ka kaam sirf /api/sms se nayi live
+# SMS group me bhejna hai — CLI lookup, live feed ya koi aur source nahi.
+CLI_SEARCH = os.getenv("CLI_SEARCH", "0").strip().lower() not in (
     "0", "off", "false", "no"
 )
 LIVE_FEED_PATH = "/api/live_feed"
